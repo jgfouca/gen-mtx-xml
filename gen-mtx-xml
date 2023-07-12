@@ -73,14 +73,14 @@ OR
 {0} --help
 
 \033[1mEXAMPLES:\033[0m
-    \033[1;32m# Get code for log10(3.)*2.0 \033[0m
-    > {0} myconst 'log10(3.)*2.0'
+    \033[1;32m# Gen random 4x4 matrix with nnz=10pct and blocksize=2 \033[0m
+    > {0} 4x10 -b 2
 """.format(Path(args[0]).name),
         description=description,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument("-m", "--mtx", help="The matrix to generate. This can be a number "
+    parser.add_argument("mtx_arg", help="The matrix to generate. This can be a number "
                         "for a hardcoded matrix or string encoding for random matrix. "
                         "The encoding has the following format: NxPPP where N is the dim and PPP "
                         "is the percent of non-diag elements that are non-zero.")
@@ -104,10 +104,17 @@ def gen_random_mtx(dim, pct_nnz):
             if i == j:
                 # Diag, make a non-zero value approx equal to dim
                 mtx[i][j] = random.randint(dim - 1, dim+1)
-            elif random.randint(1, pct_nnz) <= pct_nnz:
+            elif random.randint(1, 100) <= pct_nnz:
                 mtx[i][j] = random.randint(1, dim//2)
 
     return mtx
+
+###############################################################################
+def print_matrix(mtx):
+###############################################################################
+    print("Your matrix is:")
+    for row in mtx:
+        print(" ".join([str(item) for item in row]))
 
 ###############################################################################
 def get_vec(dim):
@@ -131,11 +138,12 @@ def get_mtx(mtx_arg, level, bsize):
 ###############################################################################
 def gen_mtx_file(mtx, filename):
 ###############################################################################
-    dim = len(mtx)
+    rows = len(mtx)
+    cols = len(mtx[0])
     nnzs = []
 
-    for i in range(dim):
-        for j in range(dim):
+    for i in range(rows):
+        for j in range(cols):
             item = mtx[i][j]
             if item != 0:
                 nnzs.append((item, i, j))
@@ -146,9 +154,15 @@ def gen_mtx_file(mtx, filename):
         fp.unlink()
 
     with open(fp, "w") as fd:
-        fd.write(f"{dim} {dim} {len(nnzs)}\n")
+        fd.write(f"%%MatrixMarket matrix {'array' if cols == 1 else 'coordinate'} real general\n")
+        fd.write(f"{rows} {cols} {'' if cols == 1 else len(nnzs)}\n")
         for val, row, col in nnzs:
-            fd.write(f"{row} {col} {val}\n")
+            if cols == 1:
+                fd.write(f"{val}\n")
+            else:
+                fd.write(f"{row+1} {col+1} {val}\n")
+
+    print(f"Made file {filename}")
 
 ###############################################################################
 def gen_xml_file(filename, level, bsize, root_name):
@@ -162,6 +176,8 @@ def gen_xml_file(filename, level, bsize, root_name):
     with open(fp, "w") as fd:
         fd.write(text)
 
+    print(f"Made file {filename}")
+
 ###############################################################################
 def gen_mtx_xml(mtx_arg, level, bsize, seed):
 ###############################################################################
@@ -171,6 +187,7 @@ def gen_mtx_xml(mtx_arg, level, bsize, seed):
 
     # Get the matrix as a 2D array
     mtx, root_name = get_mtx(mtx_arg, level, bsize)
+    print_matrix(mtx)
     dim = len(mtx)
     vec = get_vec(dim)
     expect(dim % bsize == 0, f"Matrix dim {dim} must be evenly divided by block size {bsize}")
