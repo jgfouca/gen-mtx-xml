@@ -1,0 +1,195 @@
+#! /usr/bin/env python3
+
+"""
+Given some paramters, generate a mtm and vec file and an XML input file
+that is set to use these.
+"""
+
+import argparse, sys, random, re
+from pathlib import Path
+
+HARDCODED_MTXS = [
+    [
+        [],
+    ],
+    [
+        [],
+    ],
+]
+
+SENT = "GEN_MTX_XML_"
+XML_TEMPLATE = \
+"""
+<ParameterList name="test_params">
+  <Parameter name="mm_file" type="string" value="GEN_MTX_XML_ROOT_NAME.mtx"/>
+  <Parameter name="rhs_mm_file" type="string" value="GEN_MTX_XML_ROOT_NAME.vec"/>
+
+  <Parameter name="solver_type" type="string" value="PseudoBlock Gmres"/>
+  <ParameterList name="Belos">
+    <!-- "Num Blocks" is the krylov subspace size, or iters-per-restart. -->
+    <Parameter name="Num Blocks" type="int" value="3"/>
+    <Parameter name="Verbosity" type="int" value="33"/>
+    <Parameter name="Maximum Iterations" type="int" value="300"/>
+    <Parameter name="Orthogonalization" type="string" value="ICGS"/>
+    <Parameter name="Output Style" type="int" value="1"/>
+    <Parameter name="Output Frequency" type="int" value="1"/>
+  </ParameterList>
+
+  <Parameter name="Ifpack2::Preconditioner" type="string" value="FAST_ILU"/>
+  <ParameterList name="Ifpack2">
+    <Parameter name="level" type="int" value="GEN_MTX_XML_LEVEL"/>
+    <Parameter name="triangular solve iterations" type="int" value="2"/>
+    <Parameter name="block crs" type="bool" value="true"/>
+    <Parameter name="block crs block size" type="int" value="GEN_MTX_XML_BSIZE"/>
+  </ParameterList>
+
+  <Parameter name="expectNumIters" type="int" value="4"/>
+</ParameterList>
+"""
+
+###############################################################################
+def expect(condition, error_msg, exc_type=SystemExit, error_prefix="ERROR:"):
+###############################################################################
+    """
+    Similar to assert except doesn't generate an ugly stacktrace. Useful for
+    checking user error, not programming error.
+
+    >>> expect(True, "error1")
+    >>> expect(False, "error2")
+    Traceback (most recent call last):
+        ...
+    SystemExit: ERROR: error2
+    """
+    if not condition:
+        msg = error_prefix + " " + error_msg
+        raise exc_type(msg)
+
+###############################################################################
+def parse_command_line(args, description):
+###############################################################################
+    parser = argparse.ArgumentParser(
+        usage="""\n{0} [--mtx XXX] [--level N] [--bsize M]
+OR
+{0} --help
+
+\033[1mEXAMPLES:\033[0m
+    \033[1;32m# Get code for log10(3.)*2.0 \033[0m
+    > {0} myconst 'log10(3.)*2.0'
+""".format(Path(args[0]).name),
+        description=description,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument("-m", "--mtx", help="The matrix to generate. This can be a number "
+                        "for a hardcoded matrix or string encoding for random matrix. "
+                        "The encoding has the following format: NxPPP where N is the dim and PPP "
+                        "is the percent of non-diag elements that are non-zero.")
+
+    parser.add_argument("-l", "--level", type=int, default=0, help="The number of levels in the preconditioner")
+
+    parser.add_argument("-b", "--bsize", type=int, default=1, help="The block size of the bcrs")
+
+    parser.add_argument("-s", "--seed", type=int, default=None, help="The random seed")
+
+    args = parser.parse_args(args[1:])
+
+    return args
+
+###############################################################################
+def gen_random_mtx(dim, pct_nnz):
+###############################################################################
+    mtx = [ [0]*dim for item in range(dim) ]
+    for i in range(0, dim):
+        for j in range(0, dim):
+            if i == j:
+                # Diag, make a non-zero value approx equal to dim
+                mtx[i][j] = random.randint(dim - 1, dim+1)
+            elif random.randint(1, pct_nnz) <= pct_nnz:
+                mtx[i][j] = random.randint(1, dim//2)
+
+    return mtx
+
+###############################################################################
+def get_vec(dim):
+###############################################################################
+    return [ [item] for item in range(1, dim+1) ]
+
+###############################################################################
+def get_mtx(mtx_arg, level, bsize):
+###############################################################################
+    if mtx_arg.isdigit():
+        idx = int(mtx_arg)
+        expect(idx < len(HARDCODED_MTXS), f"{idx} is not a valid hardcoded matrix")
+        return HARDCODED_MTXS[idx], f"hard_{mtx_arg}_{bsize}_{level}"
+    else:
+        validate_re = re.compile(r"^\d+x\d+$")
+        expect(validate_re.match(mtx_arg) is not None, f"{mtx_arg} encoding did not match expected NNxPPP")
+        dim, pct_nnz = [int(item) for item in mtx_arg.split("x")]
+        mtx = gen_random_mtx(dim, pct_nnz)
+        return mtx, f"rand_{dim}_{bsize}_{level}_{pct_nnz}_{str(hash(str(mtx)))[-8:]}"
+
+###############################################################################
+def gen_mtx_file(mtx, filename):
+###############################################################################
+    dim = len(mtx)
+    nnzs = []
+
+    for i in range(dim):
+        for j in range(dim):
+            item = mtx[i][j]
+            if item != 0:
+                nnzs.append((item, i, j))
+
+    fp = Path(filename)
+    if fp.exists():
+        expect(filename.startswith("hard_"), f"random {fp} already exists?")
+        fp.unlink()
+
+    with open(fp, "w") as fd:
+        fd.write(f"{dim} {dim} {len(nnzs)}\n")
+        for val, row, col in nnzs:
+            fd.write(f"{row} {col} {val}\n")
+
+###############################################################################
+def gen_xml_file(filename, level, bsize, root_name):
+###############################################################################
+    text = XML_TEMPLATE
+    replaces = [("LEVEL", level), ("BSIZE", bsize), ("ROOT_NAME", root_name)]
+    for suffix, value in replaces:
+        text = text.replace(SENT + suffix, str(value))
+
+    fp = Path(filename)
+    with open(fp, "w") as fd:
+        fd.write(text)
+
+###############################################################################
+def gen_mtx_xml(mtx_arg, level, bsize, seed):
+###############################################################################
+    # Set up random seed
+    if seed is not None:
+        random.seed(seed)
+
+    # Get the matrix as a 2D array
+    mtx, root_name = get_mtx(mtx_arg, level, bsize)
+    dim = len(mtx)
+    vec = get_vec(dim)
+    expect(dim % bsize == 0, f"Matrix dim {dim} must be evenly divided by block size {bsize}")
+
+    # Write the output files
+    gen_mtx_file(mtx, f"{root_name}.mtx")
+    gen_mtx_file(vec, f"{root_name}.vec")
+    gen_xml_file(f"{root_name}.xml", level, bsize, root_name)
+
+    return True
+
+###############################################################################
+def _main_func(description):
+###############################################################################
+    success = gen_mtx_xml(**vars(parse_command_line(sys.argv, description)))
+
+    sys.exit(0 if success else 1)
+
+###############################################################################
+
+if (__name__ == "__main__"):
+    _main_func(__doc__)
