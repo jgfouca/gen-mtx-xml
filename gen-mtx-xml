@@ -7,22 +7,49 @@ that is set to use these.
 
 import argparse, sys, random, re
 from pathlib import Path
+from utils import expect, run_cmd_no_fail
 
 HARDCODED_MTXS = [
+    # Simplest 4x4 symmetric
     [
-        [],
+        [4, 0, 0, 1],
+        [1, 4, 0, 0],
+        [1, 0, 4, 0],
+        [1, 0, 0, 4],
     ],
+    # Simple 4x4 asymmetric
     [
-        [],
+        [4, 1, 2, 3],
+        [1, 4, 0, 0],
+        [1, 0, 4, 0],
+        [1, 0, 0, 4],
+    ],
+    # 6x6 symmetric
+    [
+        [5, 1, 1, 1, 1, 0],
+        [1, 5, 0, 0, 0, 0],
+        [1, 0, 5, 0, 0, 0],
+        [1, 0, 0, 5, 0, 0],
+        [1, 0, 0, 0, 5, 0],
+        [0, 0, 0, 0, 0, 5],
+    ],
+    # 6x6 asymmetric
+    [
+        [5, 1, 2, 3, 4, 3],
+        [1, 5, 0, 0, 0, 0],
+        [1, 0, 5, 0, 0, 0],
+        [1, 0, 0, 5, 0, 0],
+        [1, 0, 0, 0, 5, 0],
+        [0, 0, 0, 0, 0, 5],
     ],
 ]
 
 SENT = "GEN_MTX_XML_"
 XML_TEMPLATE = \
-"""
+f"""
 <ParameterList name="test_params">
-  <Parameter name="mm_file" type="string" value="GEN_MTX_XML_ROOT_NAME.mtx"/>
-  <Parameter name="rhs_mm_file" type="string" value="GEN_MTX_XML_ROOT_NAME.vec"/>
+  <Parameter name="mm_file" type="string" value="{SENT}ROOT_NAME.mtx"/>
+  <Parameter name="rhs_mm_file" type="string" value="{SENT}ROOT_NAME.vec"/>
 
   <Parameter name="solver_type" type="string" value="PseudoBlock Gmres"/>
   <ParameterList name="Belos">
@@ -37,32 +64,15 @@ XML_TEMPLATE = \
 
   <Parameter name="Ifpack2::Preconditioner" type="string" value="FAST_ILU"/>
   <ParameterList name="Ifpack2">
-    <Parameter name="level" type="int" value="GEN_MTX_XML_LEVEL"/>
+    <Parameter name="level" type="int" value="{SENT}LEVEL"/>
     <Parameter name="triangular solve iterations" type="int" value="2"/>
     <Parameter name="block crs" type="bool" value="true"/>
-    <Parameter name="block crs block size" type="int" value="GEN_MTX_XML_BSIZE"/>
+    <Parameter name="block crs block size" type="int" value="{SENT}BSIZE"/>
   </ParameterList>
 
   <Parameter name="expectNumIters" type="int" value="4"/>
 </ParameterList>
 """
-
-###############################################################################
-def expect(condition, error_msg, exc_type=SystemExit, error_prefix="ERROR:"):
-###############################################################################
-    """
-    Similar to assert except doesn't generate an ugly stacktrace. Useful for
-    checking user error, not programming error.
-
-    >>> expect(True, "error1")
-    >>> expect(False, "error2")
-    Traceback (most recent call last):
-        ...
-    SystemExit: ERROR: error2
-    """
-    if not condition:
-        msg = error_prefix + " " + error_msg
-        raise exc_type(msg)
 
 ###############################################################################
 def parse_command_line(args, description):
@@ -87,9 +97,13 @@ OR
 
     parser.add_argument("-l", "--level", type=int, default=0, help="The number of levels in the preconditioner")
 
-    parser.add_argument("-b", "--bsize", type=int, default=1, help="The block size of the bcrs")
+    parser.add_argument("-b", "--bsize", type=int, default=2, help="The block size of the bcrs")
 
-    parser.add_argument("-s", "--seed", type=int, default=None, help="The random seed")
+    parser.add_argument("-S", "--seed", type=int, default=None, help="The random seed")
+
+    parser.add_argument("-r", "--run", action="store_true", help="The random seed")
+
+    parser.add_argument("-s", "--soak", type=int, default=None, help="Run a randomized soak test this number of times. Implies --run")
 
     args = parser.parse_args(args[1:])
 
@@ -163,6 +177,7 @@ def gen_mtx_file(mtx, filename):
                 fd.write(f"{row+1} {col+1} {val}\n")
 
     print(f"Made file {filename}")
+    return fp
 
 ###############################################################################
 def gen_xml_file(filename, level, bsize, root_name):
@@ -177,25 +192,43 @@ def gen_xml_file(filename, level, bsize, root_name):
         fd.write(text)
 
     print(f"Made file {filename}")
+    return fp
 
 ###############################################################################
-def gen_mtx_xml(mtx_arg, level, bsize, seed):
+def gen_mtx_xml(mtx_arg, level, bsize, seed, run, soak):
 ###############################################################################
     # Set up random seed
     if seed is not None:
         random.seed(seed)
 
-    # Get the matrix as a 2D array
-    mtx, root_name = get_mtx(mtx_arg, level, bsize)
-    print_matrix(mtx)
-    dim = len(mtx)
-    vec = get_vec(dim)
-    expect(dim % bsize == 0, f"Matrix dim {dim} must be evenly divided by block size {bsize}")
+    if soak is not None:
+        run = True
+    else:
+        soak = 1
 
-    # Write the output files
-    gen_mtx_file(mtx, f"{root_name}.mtx")
-    gen_mtx_file(vec, f"{root_name}.vec")
-    gen_xml_file(f"{root_name}.xml", level, bsize, root_name)
+    for _ in range(soak):
+        # Get the matrix as a 2D array
+        mtx, root_name = get_mtx(mtx_arg, level, bsize)
+        print_matrix(mtx)
+        dim = len(mtx)
+        vec = get_vec(dim)
+        expect(dim % bsize == 0, f"Matrix dim {dim} must be evenly divided by block size {bsize}")
+        if soak > 1:
+            expect(root_name.startswith("rand_"), "Makes no sense to run soak test on hardcoded mtx")
+
+        # Write the output files
+        mtx_file = gen_mtx_file(mtx, f"{root_name}.mtx")
+        vec_file = gen_mtx_file(vec, f"{root_name}.vec")
+        xml_file = gen_xml_file(f"{root_name}.xml", level, bsize, root_name)
+
+        if run:
+            belos_exe = Path("Ifpack2_tif_belos.exe")
+            expect(belos_exe.exists(), "-r option must be used in same dir as ctest build dir")
+            run_cmd_no_fail(f"./{belos_exe} --xml_file={xml_file}", verbose=True)
+
+        if soak > 1:
+            for cleanup_file in [mtx_file, vec_file, xml_file]:
+                cleanup_file.unlink()
 
     return True
 
