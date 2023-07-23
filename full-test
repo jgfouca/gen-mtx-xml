@@ -6,7 +6,7 @@ Run a complete set of soak tests
 
 import argparse, sys
 from pathlib import Path
-from utils import run_cmd_no_fail
+from utils import run_cmd, expect
 
 ###############################################################################
 def parse_command_line(args, description):
@@ -42,7 +42,9 @@ def full_test(level, num):
         for density in densities:
             for block_size in range(1, N+1):
                 if N % block_size == 0:
-                    run_cmd_no_fail(f"gen-mtx-xml -s {num} {N}x{density} -b {block_size} -l {level}", verbose=True)
+                    cmd = f"gen-mtx-xml -s {num} {N}x{density} -b {block_size} -l {level}"
+                    stat, out, err = run_cmd(cmd, verbose=True)
+                    expect(stat == 0, f"{cmd} failed:\n{out}\n\n{err}")
 
     return True
 
