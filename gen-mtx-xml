@@ -101,6 +101,8 @@ OR
 
     parser.add_argument("-S", "--seed", type=int, default=None, help="The random seed")
 
+    parser.add_argument("-d", "--dense-blocks", action="store_true", help="Concentrate nnzs in blocks")
+
     parser.add_argument("-r", "--run", action="store_true", help="The random seed")
 
     parser.add_argument("-s", "--soak", type=int, default=None, help="Run a randomized soak test this number of times. Implies --run")
@@ -110,7 +112,7 @@ OR
     return args
 
 ###############################################################################
-def gen_random_mtx(dim, pct_nnz):
+def gen_random_sparse_blocks_mtx(dim, pct_nnz):
 ###############################################################################
     mtx = [ [0]*dim for item in range(dim) ]
     for i in range(0, dim):
@@ -122,6 +124,42 @@ def gen_random_mtx(dim, pct_nnz):
                 mtx[i][j] = random.randint(1, dim//2)
 
     return mtx
+
+###############################################################################
+def gen_random_dense_blocks_mtx(dim, pct_nnz, bsize):
+###############################################################################
+    bdim = dim // bsize
+    bsparsity = [ [False]*bdim for item in range(bdim) ]
+    mtx = [ [0]*dim for item in range(dim) ]
+
+    # Compute block sparsity pattern
+    for i in range(bdim):
+        for j in range(bdim):
+            if i == j:
+                bsparsity[i][j] = True
+            elif random.randint(1, 100) <= pct_nnz:
+                bsparsity[i][j] = True
+
+    # Compute actual entries
+    for i in range(dim):
+        for j in range(dim):
+            bi = i // bsize
+            bj = j // bsize
+            if i == j:
+                # Diag, make a non-zero value approx equal to dim
+                mtx[i][j] = random.randint(dim - 1, dim+1)
+            elif bsparsity[bi][bj]:
+                mtx[i][j] = random.randint(1, dim//2)
+
+    return mtx
+
+###############################################################################
+def gen_random_mtx(dim, pct_nnz, bsize, dense_blocks):
+###############################################################################
+    if dense_blocks:
+        return gen_random_dense_blocks_mtx(dim, pct_nnz, bsize)
+    else:
+        return gen_random_sparse_blocks_mtx(dim, pct_nnz)
 
 ###############################################################################
 def print_matrix(mtx):
@@ -136,7 +174,7 @@ def get_vec(dim):
     return [ [item] for item in range(1, dim+1) ]
 
 ###############################################################################
-def get_mtx(mtx_arg, level, bsize):
+def get_mtx(mtx_arg, level, bsize, dense_blocks):
 ###############################################################################
     if mtx_arg.isdigit():
         idx = int(mtx_arg)
@@ -146,8 +184,9 @@ def get_mtx(mtx_arg, level, bsize):
         validate_re = re.compile(r"^\d+x\d+$")
         expect(validate_re.match(mtx_arg) is not None, f"{mtx_arg} encoding did not match expected NNxPPP")
         dim, pct_nnz = [int(item) for item in mtx_arg.split("x")]
-        mtx = gen_random_mtx(dim, pct_nnz)
-        return mtx, f"rand_{dim}_{bsize}_{level}_{pct_nnz}_{str(hash(str(mtx)))[-8:]}"
+        mtx = gen_random_mtx(dim, pct_nnz, bsize, dense_blocks)
+        density_desc = "dense_blocks" if dense_blocks else "sparse_blocks"
+        return mtx, f"rand_{dim}_{bsize}_{level}_{pct_nnz}_{density_desc}_{str(hash(str(mtx)))[-8:]}"
 
 ###############################################################################
 def gen_mtx_file(mtx, filename):
@@ -195,7 +234,7 @@ def gen_xml_file(filename, level, bsize, root_name):
     return fp
 
 ###############################################################################
-def gen_mtx_xml(mtx_arg, level, bsize, seed, run, soak):
+def gen_mtx_xml(mtx_arg, level, bsize, seed, dense_blocks, run, soak):
 ###############################################################################
     # Set up random seed
     if seed is not None:
@@ -208,9 +247,11 @@ def gen_mtx_xml(mtx_arg, level, bsize, seed, run, soak):
 
     for _ in range(soak):
         # Get the matrix as a 2D array
-        mtx, root_name = get_mtx(mtx_arg, level, bsize)
-        print_matrix(mtx)
+        mtx, root_name = get_mtx(mtx_arg, level, bsize, dense_blocks)
         dim = len(mtx)
+        if dim <= 10:
+            print_matrix(mtx)
+
         vec = get_vec(dim)
         expect(dim % bsize == 0, f"Matrix dim {dim} must be evenly divided by block size {bsize}")
         if soak > 1:
