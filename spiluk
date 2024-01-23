@@ -1,59 +1,162 @@
 #! /usr/bin/env python3
 
+"""
+Run KK spiluk, parse result and compare against scipy
+"""
+
 import scipy
 import scipy.linalg   # SciPy Linear Algebra Library
 from scipy.sparse import bsr_matrix, csr_matrix
 
-def pprint(mtx):
-    dim = mtx.shape[0]
+import argparse, sys, random, math
+from pathlib import Path
+from utils import expect, run_cmd_no_fail
+
+###############################################################################
+def parse_command_line(args, description):
+###############################################################################
+    parser = argparse.ArgumentParser(
+        usage="""\n{0}
+OR
+{0} --help
+
+\033[1mEXAMPLES:\033[0m
+    \033[1;32m#  \033[0m
+    > {0}
+""".format(Path(args[0]).name),
+        description=description,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument("-t", "--threads", type=int, default=1, help="The number of threads")
+
+    args = parser.parse_args(args[1:])
+
+    return args
+
+###############################################################################
+def pprint(mtx, indent=""):
+###############################################################################
     for row in mtx:
+        print(indent, end="")
         for item in row:
             print("{:.5f}".format(item), end=" ")
 
         print()
 
-A = scipy.array([
-    [10.00, 0.00, 0.30, 0.00, 0.00, 0.60, 0.00, 0.00, 0.00],
-    [0.00, 11.00, 0.00, 0.00, 0.00, 0.00, 0.70, 0.00, 0.00],
-    [0.00, 0.00, 12.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
-    [5.00, 0.00, 0.00, 13.00, 1.00, 0.00, 0.00, 0.00, 0.00],
-    [4.00, 0.00, 0.00, 0.00, 14.00, 0.00, 0.00, 0.00, 0.00],
-    [0.00, 3.00, 0.00, 0.00, 0.00, 15.00, 0.00, 0.00, 0.00],
-    [0.00, 0.00, 7.00, 0.00, 0.00, 0.00, 16.00, 0.00, 0.00],
-    [0.00, 0.00, 0.00, 6.00, 5.00, 0.00, 0.00, 17.00, 0.00],
-    [0.00, 0.00, 0.00, 2.00, 2.50, 0.00, 0.00, 0.00, 18.00]
-])
-P, L, U = scipy.linalg.lu(A)
+###############################################################################
+def parse_matrix(output, look_for):
+###############################################################################
+    raw_array = []
+    active = False
+    for line in output.splitlines():
+        if look_for in line:
+            expect(not active, "bad active")
+            active = True
+        elif active:
+            if line[0].isdigit():
+                raw_array.append([float(item) for item in line.split()])
+            else:
+                break
 
-print("A:")
-pprint(A)
+    return scipy.array(raw_array)
 
-print("P:")
-pprint(P)
+###############################################################################
+def parse_output(output):
+###############################################################################
+    A = parse_matrix(output, "A input")
+    L = parse_matrix(output, "L result")
+    U = parse_matrix(output, "U result")
 
-print("L:")
-pprint(L)
+    block_size = None
+    for line in output.splitlines():
+        if "block_size=" in line:
+            token = line.split()[2]
+            expect(token.startswith("block_size="), f"Unexpected block_size line '{line}'")
+            block_size = int(token.split("=")[-1].strip())
 
-print("U:")
-pprint(U)
+    expect(block_size is not None, "No block_size found in output")
 
-A_csr = csr_matrix(A)
-A_bsr = bsr_matrix(A, blocksize=(3, 3))
+    return A, L, U, block_size
 
-silu_csr = scipy.sparse.linalg.spilu(A_csr, fill_factor=2)
-print("L_csr:")
-pprint(silu_csr.L.toarray())
-print("U_csr:")
-pprint(silu_csr.U.toarray())
+###############################################################################
+def compare_array(expected, actual, name):
+###############################################################################
+    print(f"  Checking {name}")
+    expect(len(expected) == len(actual), "Incompatible arrays")
 
-silu_bsr = scipy.sparse.linalg.spilu(A_bsr, fill_factor=2)
-print("L_bsr:")
-pprint(silu_bsr.L.toarray())
-print("U_bsr:")
-pprint(silu_bsr.U.toarray())
+    result = True
 
-slu_bsr = scipy.sparse.linalg.splu(A_bsr)
-print("L_bsr_exact:")
-pprint(slu_bsr.L.toarray())
-print("U_bsr_exact:")
-pprint(slu_bsr.U.toarray())
+    for row1, row2 in zip(expected, actual):
+        for item1, item2 in zip(row1, row2):
+            if not math.isclose(item1, item2, abs_tol=1e-5):
+                print("    {:.5f} != {:.5f}".format(item1, item2))
+                result = False
+
+    if not result:
+        print("    Expected:")
+        pprint(expected, indent="      ")
+        print("    Actual:")
+        pprint(actual, indent="      ")
+
+    return result
+
+###############################################################################
+def compare_arrays(expected_L, expected_U, L, U, name):
+###############################################################################
+    print(f"Comparing against {name}")
+
+    result = True
+    result &= compare_array(expected_L, L, "L")
+    result &= compare_array(expected_U, U, "U")
+
+    return result
+
+###############################################################################
+def run_scipy_and_compare(A, L, U, block_size):
+###############################################################################
+    result = True
+
+    # direct unblocked LU
+    _, L_lu_unblocked, U_lu_unblocked = scipy.linalg.lu(A)
+
+    # create A's for sparse operations
+    A_csr = csr_matrix(A)
+    A_bsr = bsr_matrix(A, blocksize=(block_size, block_size))
+
+    silu_csr = scipy.sparse.linalg.spilu(A_csr, fill_factor=2)
+    L_ilu_unblocked, U_ilu_unblocked = silu_csr.L.toarray(), silu_csr.U.toarray()
+
+    silu_bsr = scipy.sparse.linalg.spilu(A_bsr, fill_factor=2)
+    L_ilu_blocked, U_ilu_blocked = silu_bsr.L.toarray(), silu_bsr.U.toarray()
+
+    slu_bsr = scipy.sparse.linalg.splu(A_bsr)
+    L_lu_blocked, U_lu_blocked = slu_bsr.L.toarray(), slu_bsr.U.toarray()
+
+    result &= compare_arrays(L_lu_unblocked, U_lu_unblocked, L, U, "lu_unblocked")
+    result &= compare_arrays(L_ilu_unblocked, U_ilu_unblocked, L, U, "ilu_unblocked")
+    result &= compare_arrays(L_lu_blocked, U_lu_blocked, L, U, "lu_blocked")
+    result &= compare_arrays(L_ilu_blocked, U_ilu_blocked, L, U, "ilu_blocked")
+
+    return result
+
+###############################################################################
+def spiluk(threads):
+###############################################################################
+    output = run_cmd_no_fail(f"OMP_NUM_THREADS={threads} ./KokkosKernels_sparse_openmp --gtest_filter=openmp.sparse_spiluk_double_int_size_t_TestDevice")
+
+    A, L, U, block_size = parse_output(output)
+
+    return run_scipy_and_compare(A, L, U, block_size)
+
+###############################################################################
+def _main_func(description):
+###############################################################################
+    success = spiluk(**vars(parse_command_line(sys.argv, description)))
+
+    sys.exit(0 if success else 1)
+
+###############################################################################
+
+if (__name__ == "__main__"):
+    _main_func(__doc__)
