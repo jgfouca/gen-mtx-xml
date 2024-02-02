@@ -10,7 +10,35 @@ from scipy.sparse import bsr_matrix, csr_matrix
 
 import argparse, sys, random, math
 from pathlib import Path
-from utils import expect, run_cmd_no_fail
+from utils import expect, run_cmd
+
+L_luc_str = \
+"""
+L luc
+1 0 0 0 0 0 0 0 0
+0 1 0 0 0 0 0 0 0
+0 0 1 0 0 0 0 0 0
+0.5 0 -0.0125 1 0 0 0 0 0
+0.4 0 -0.01 0 1 0 0 0 0
+0 0.27272727 0 0 0 1 0 0 0
+0 0 0.5833333 0 0 0 1 0 0
+0 0 0 0.46153846 0.32417582 0.01441758 0 1 0
+0 0 0 0.15384615 0.16758242 0.00575824 0 0 1
+"""
+
+U_luc_str = \
+"""
+U luc
+10 0 0.3 0 0 0.6 0 0 0
+0 11 0 0 0 0 0.7 0 0
+0 0 12 0 0 0 0 0 0
+0 0 0 13 1 -0.3 0 0 0
+0 0 0 0 14 -0.24 0 0 0
+0 0 0 0 0 15 0 0 0
+0 0 0 0 0 0 16 0 0
+0 0 0 0 0 0 0 17 0
+0 0 0 0 0 0 0 0 18
+"""
 
 ###############################################################################
 def parse_command_line(args, description):
@@ -29,6 +57,18 @@ OR
     )
 
     parser.add_argument("-t", "--threads", type=int, default=1, help="The number of threads")
+
+    parser.add_argument("-l", "--luc", action="store_true", help="Use Luc hardcoded results to compare")
+
+    parser.add_argument("--ulu", action="store_true", help="Use unblocked LU")
+
+    parser.add_argument("--blu", action="store_true", help="Use blocked LU")
+
+    parser.add_argument("--uilu", action="store_true", help="Use unblocked ILU")
+
+    parser.add_argument("--bilu", action="store_true", help="Use blocked ILU")
+
+    parser.add_argument("-f", "--fill-level", type=int, default=2, help="Fill level for ILU")
 
     args = parser.parse_args(args[1:])
 
@@ -71,7 +111,7 @@ def parse_output(output):
     block_size = None
     for line in output.splitlines():
         if "block_size=" in line:
-            token = line.split()[2]
+            token = line.split()[4]
             expect(token.startswith("block_size="), f"Unexpected block_size line '{line}'")
             block_size = int(token.split("=")[-1].strip())
 
@@ -113,41 +153,55 @@ def compare_arrays(expected_L, expected_U, L, U, name):
     return result
 
 ###############################################################################
-def run_scipy_and_compare(A, L, U, block_size):
+def run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_level):
 ###############################################################################
     result = True
-
-    # direct unblocked LU
-    _, L_lu_unblocked, U_lu_unblocked = scipy.linalg.lu(A)
 
     # create A's for sparse operations
     A_csr = csr_matrix(A)
     A_bsr = bsr_matrix(A, blocksize=(block_size, block_size))
 
-    silu_csr = scipy.sparse.linalg.spilu(A_csr, fill_factor=2)
-    L_ilu_unblocked, U_ilu_unblocked = silu_csr.L.toarray(), silu_csr.U.toarray()
+    if luc:
+        L_luc = parse_matrix(L_luc_str, "L luc")
+        U_luc = parse_matrix(U_luc_str, "U luc")
 
-    silu_bsr = scipy.sparse.linalg.spilu(A_bsr, fill_factor=2)
-    L_ilu_blocked, U_ilu_blocked = silu_bsr.L.toarray(), silu_bsr.U.toarray()
+        result &= compare_arrays(L_luc, U_luc, L, U, "luc")
 
-    slu_bsr = scipy.sparse.linalg.splu(A_bsr)
-    L_lu_blocked, U_lu_blocked = slu_bsr.L.toarray(), slu_bsr.U.toarray()
+    if ulu:
+        _, L_lu_unblocked, U_lu_unblocked = scipy.linalg.lu(A)
 
-    result &= compare_arrays(L_lu_unblocked, U_lu_unblocked, L, U, "lu_unblocked")
-    result &= compare_arrays(L_ilu_unblocked, U_ilu_unblocked, L, U, "ilu_unblocked")
-    result &= compare_arrays(L_lu_blocked, U_lu_blocked, L, U, "lu_blocked")
-    result &= compare_arrays(L_ilu_blocked, U_ilu_blocked, L, U, "ilu_blocked")
+        result &= compare_arrays(L_lu_unblocked, U_lu_unblocked, L, U, "lu_unblocked")
+
+    if blu:
+        slu_bsr = scipy.sparse.linalg.splu(A_bsr)
+        L_lu_blocked, U_lu_blocked = slu_bsr.L.toarray(), slu_bsr.U.toarray()
+
+        result &= compare_arrays(L_lu_blocked, U_lu_blocked, L, U, "lu_blocked")
+
+    if uilu:
+        silu_csr = scipy.sparse.linalg.spilu(A_csr, fill_factor=fill_level)
+        L_ilu_unblocked, U_ilu_unblocked = silu_csr.L.toarray(), silu_csr.U.toarray()
+
+        result &= compare_arrays(L_ilu_unblocked, U_ilu_unblocked, L, U, "ilu_unblocked")
+
+    if bilu:
+        silu_bsr = scipy.sparse.linalg.spilu(A_bsr, fill_factor=fill_level)
+        L_ilu_blocked, U_ilu_blocked = silu_bsr.L.toarray(), silu_bsr.U.toarray()
+
+        result &= compare_arrays(L_ilu_blocked, U_ilu_blocked, L, U, "ilu_blocked")
 
     return result
 
 ###############################################################################
-def spiluk(threads):
+def spiluk(threads, luc, ulu, blu, uilu, bilu, fill_level):
 ###############################################################################
-    output = run_cmd_no_fail(f"OMP_NUM_THREADS={threads} ./KokkosKernels_sparse_openmp --gtest_filter=openmp.sparse_spiluk_double_int_size_t_TestDevice")
+    cmd = f"OMP_NUM_THREADS={threads} ./KokkosKernels_sparse_openmp --gtest_filter=openmp.sparse_spiluk_double_int_size_t_TestDevice"
+    print(f"RUNNING: {cmd}")
+    output = run_cmd(cmd)[1]
 
     A, L, U, block_size = parse_output(output)
 
-    return run_scipy_and_compare(A, L, U, block_size)
+    return run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_level)
 
 ###############################################################################
 def _main_func(description):
