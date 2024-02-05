@@ -5,12 +5,14 @@ Run KK spiluk, parse result and compare against scipy
 """
 
 import scipy
-import scipy.linalg   # SciPy Linear Algebra Library
+import numpy as np
+import scipy.linalg as la  # SciPy Linear Algebra Library
 from scipy.sparse import bsr_matrix, csr_matrix
 
-import argparse, sys, random, math
+import argparse, sys, math
 from pathlib import Path
 from utils import expect, run_cmd
+from copy import deepcopy
 
 L_luc_str = \
 """
@@ -64,6 +66,8 @@ OR
 
     parser.add_argument("--blu", action="store_true", help="Use blocked LU")
 
+    parser.add_argument("--ablu", action="store_true", help="Analytic block LU")
+
     parser.add_argument("--uilu", action="store_true", help="Use unblocked ILU")
 
     parser.add_argument("--bilu", action="store_true", help="Use blocked ILU")
@@ -85,6 +89,15 @@ def pprint(mtx, indent=""):
         print()
 
 ###############################################################################
+def pprint_blocked(mtx, block_size):
+###############################################################################
+    for row in mtx:
+        for col in row:
+            pprint(col)
+
+        print()
+
+###############################################################################
 def parse_matrix(output, look_for):
 ###############################################################################
     raw_array = []
@@ -99,7 +112,7 @@ def parse_matrix(output, look_for):
             else:
                 break
 
-    return scipy.array(raw_array)
+    return np.array(raw_array)
 
 ###############################################################################
 def parse_output(output):
@@ -153,7 +166,91 @@ def compare_arrays(expected_L, expected_U, L, U, name):
     return result
 
 ###############################################################################
-def run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_level):
+def create_numpy_2d_mtx(block_size):
+###############################################################################
+    return np.array(np.mat(";".join([" ".join(str(0)*block_size)] * block_size)), dtype=float)
+
+###############################################################################
+def blockize(A, block_size):
+###############################################################################
+    block = create_numpy_2d_mtx(block_size)
+    blocks_per_dim = len(A) // block_size
+    A_block = [ [deepcopy(block) for _ in range(blocks_per_dim)]
+                for _ in range(blocks_per_dim) ]
+
+    for row_idx, row in enumerate(A):
+        row_blk_idx = row_idx // block_size
+        row_offset  = row_idx % block_size
+        for col_idx, val in enumerate(row):
+            col_blk_idx = col_idx // block_size
+            col_offset  = col_idx % block_size
+            A_block[row_blk_idx][col_blk_idx][row_offset][col_offset] = val
+
+    return A_block
+
+###############################################################################
+def unblock(mtx, block_size):
+###############################################################################
+    """
+    >>> L_luc = parse_matrix(L_luc_str, "L luc")
+    >>> U_luc = parse_matrix(U_luc_str, "U luc")
+    >>> bL_luc = blockize(L_luc, 3)
+    >>> bU_luc = blockize(U_luc, 3)
+    >>> L_luc2 = unblock(bL_luc, 3)
+    >>> U_luc2 = unblock(bU_luc, 3)
+    >>> np.array_equal(L_luc, L_luc2)
+    True
+    >>> np.array_equal(U_luc, U_luc2)
+    True
+    """
+    dim_len = len(mtx) * block_size
+    result = create_numpy_2d_mtx(dim_len)
+
+    for brow_idx, brow in enumerate(mtx):
+        for bcol_idx, block in enumerate(brow):
+            for row_idx, row in enumerate(block):
+                for col_idx, val in enumerate(row):
+                    result[brow_idx * block_size + row_idx][bcol_idx * block_size + col_idx] = val
+
+    return result
+
+###############################################################################
+def analytic_block_lu(A_unblocked, block_size):
+###############################################################################
+    # Create 3 x 3 matrix of dense matrices
+    dim = len(A_unblocked)
+    assert(dim % block_size == 0);
+    block = create_numpy_2d_mtx(block_size)
+    blocks_per_dim = dim // block_size
+    assert(blocks_per_dim == 3);
+    A = blockize(A_unblocked, block_size)
+    L = [ [deepcopy(block) for _ in range(blocks_per_dim)]
+          for _ in range(blocks_per_dim) ]
+    U = [ [deepcopy(block) for _ in range(blocks_per_dim)]
+          for _ in range(blocks_per_dim) ]
+
+    # Handle easy stuff, 1st row, 1st col, L diag
+    for i in range(blocks_per_dim):
+        U[0][i] = A[0][i]
+        L[i][i] = np.identity(block_size)
+        if i > 0:
+            L[i][0] = A[i][0] @ (la.inv(A[0][0]))
+
+    # Handle next row of U
+    A00_inv = la.inv(A[0][0])
+    for i in range(1, blocks_per_dim):
+        U[1][i] = A[1][i] - (L[1][0] @ U[0][i])
+
+    # Handle last L (L_21)
+    L[2][1] = (A[2][1] - (L[2][0] @ U[0][1])) @ la.inv(U[1][1])
+
+    # Handle last U (U_22)
+    U[2][2] = A[2][2] - (L[2][0] @ U[0][2]) - (L[2][1] @ U[1][2])
+
+    return unblock(L, block_size), unblock(U, block_size)
+
+###############################################################################
+def run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, ablu, uilu, bilu, fill_level):
 ###############################################################################
     result = True
 
@@ -168,7 +265,7 @@ def run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_l
         result &= compare_arrays(L_luc, U_luc, L, U, "luc")
 
     if ulu:
-        _, L_lu_unblocked, U_lu_unblocked = scipy.linalg.lu(A)
+        _, L_lu_unblocked, U_lu_unblocked = la.lu(A)
 
         result &= compare_arrays(L_lu_unblocked, U_lu_unblocked, L, U, "lu_unblocked")
 
@@ -177,6 +274,11 @@ def run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_l
         L_lu_blocked, U_lu_blocked = slu_bsr.L.toarray(), slu_bsr.U.toarray()
 
         result &= compare_arrays(L_lu_blocked, U_lu_blocked, L, U, "lu_blocked")
+
+    if ablu:
+        L_ablu_blocked, U_ablu_blocked = analytic_block_lu(A, block_size)
+
+        result &= compare_arrays(L_ablu_blocked, U_ablu_blocked, L, U, "ablu_blocked")
 
     if uilu:
         silu_csr = scipy.sparse.linalg.spilu(A_csr, fill_factor=fill_level)
@@ -193,7 +295,7 @@ def run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_l
     return result
 
 ###############################################################################
-def spiluk(threads, luc, ulu, blu, uilu, bilu, fill_level):
+def spiluk(threads, luc, ulu, blu, ablu, uilu, bilu, fill_level):
 ###############################################################################
     cmd = f"OMP_NUM_THREADS={threads} ./KokkosKernels_sparse_openmp --gtest_filter=openmp.sparse_spiluk_double_int_size_t_TestDevice"
     print(f"RUNNING: {cmd}")
@@ -201,7 +303,7 @@ def spiluk(threads, luc, ulu, blu, uilu, bilu, fill_level):
 
     A, L, U, block_size = parse_output(output)
 
-    return run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, uilu, bilu, fill_level)
+    return run_scipy_and_compare(A, L, U, block_size, luc, ulu, blu, ablu, uilu, bilu, fill_level)
 
 ###############################################################################
 def _main_func(description):
